@@ -272,17 +272,37 @@
   }
   .panel.culture .big-result{color:var(--culture);}
   .panel.science .big-result{color:var(--science);}
+
+  /* Quick highlight pulse on any value that just changed after a recompute */
+  @keyframes valueFlashCulture{
+    0%{ background:var(--culture-soft); }
+    100%{ background:transparent; }
+  }
+  @keyframes valueFlashScience{
+    0%{ background:var(--science-soft); }
+    100%{ background:transparent; }
+  }
+  [data-key]{
+    border-radius:4px;
+    padding:0 2px;
+    margin:0 -2px;
+  }
+  .panel.culture .value-flash{ animation:valueFlashCulture .5s ease-out; }
+  .panel.science .value-flash{ animation:valueFlashScience .5s ease-out; }
   .builder-improve{
     margin-top:10px;
     font-size:.82rem;
   }
   .builder-improve .item{
     display:flex;
-    justify-content:space-between;
+    align-items:center;
+    gap:10px;
     padding:4px 0;
     color:var(--text-dim);
   }
-  .builder-improve .item span.name{color:var(--text);}
+  .builder-improve .item span.name{color:var(--text);flex:1;}
+  .builder-improve .item span.builder-count{white-space:nowrap;min-width:34px;text-align:right;}
+  .builder-improve .item span.time-saved{white-space:nowrap;min-width:84px;text-align:right;}
   .warn{color:var(--danger);font-size:.85rem;margin-top:6px;}
   footer{
     text-align:center;
@@ -844,19 +864,38 @@
     const rate = totalRatePerHour(data.passive, data.settlements);
 
     let html = "";
-    html += `<div class="big-result">Time to target: ${formatDuration(seconds)}</div>`;
+    html += `<div class="big-result" data-key="big-result">Time to target: ${formatDuration(seconds)}</div>`;
 
     if(isFinite(seconds)){
       const now = new Date();
       const reach = new Date(now.getTime() + seconds*1000);
-      html += `<div class="result-row"><span class="label">Reached at (local)</span><span class="value">${formatLocal(reach)}</span></div>`;
-      html += `<div class="result-row"><span class="label">Reached at (UTC)</span><span class="value">${formatUTC(reach)}</span></div>`;
+      html += `<div class="result-row"><span class="label">Reached at (local)</span><span class="value" data-key="reach-local">${formatLocal(reach)}</span></div>`;
+      html += `<div class="result-row"><span class="label">Reached at (UTC)</span><span class="value" data-key="reach-utc">${formatUTC(reach)}</span></div>`;
     } else {
       html += `<div class="warn">No net production configured - target will never be reached with current inputs.</div>`;
     }
 
-    html += `<div class="result-row"><span class="label">Rate per hour</span><span class="value">${rate.toFixed(2)}</span></div>`;
-    html += `<div class="result-row"><span class="label">Rate per day</span><span class="value">${(rate*24).toFixed(2)}</span></div>`;
+    html += `<div class="result-row"><span class="label">Rate per hour</span><span class="value" data-key="rate-hour">${rate.toFixed(2)}</span></div>`;
+    html += `<div class="result-row"><span class="label">Rate per day</span><span class="value" data-key="rate-day">${(rate*24).toFixed(2)}</span></div>`;
+
+    // Builders currently in use: one builder is spent (paid in advance) per
+    // project cycle, for every settlement that has the builder flag on. So
+    // a settlement that completes 2 cycles before the target is reached
+    // spends 2 builders, not 1.
+    function buildersSpent(settlements, tSeconds){
+      let total = 0;
+      settlements.forEach(s=>{
+        if(!s.builder) return;
+        const T = cycleSeconds(s);
+        if(T>0 && s.amount>0){
+          total += Math.floor(tSeconds / T);
+        }
+      });
+      return total;
+    }
+
+    const buildersInUse = buildersSpent(data.settlements, seconds);
+    html += `<div class="result-row"><span class="label">Builders in use</span><span class="value" data-key="builders-inuse">${buildersInUse} \u{1F528}</span></div>`;
 
     // Builder improvement analysis: for settlements NOT currently using a builder
     const candidates = data.settlements.filter(s => !s.builder && s.amount>0 && (s.hours>0 || s.minutes>0));
@@ -866,13 +905,30 @@
         const modified = data.settlements.map(x => x.id===s.id ? Object.assign({}, x, {builder:true}) : x);
         const newSeconds = timeToReach(delta, data.passive, modified);
         const saved = seconds - newSeconds;
+        const wouldBeBuilders = buildersSpent(modified, newSeconds);
         const label = s.name && s.name.trim() ? s.name : "(unnamed settlement)";
-        html += `<div class="item"><span class="name">${escapeHtml(label)}</span><span>-${formatDuration(saved)}</span></div>`;
+        html += `<div class="item"><span class="name">${escapeHtml(label)}</span><span class="builder-count" data-key="item-${s.id}-count">${wouldBeBuilders} \u{1F528}</span><span class="time-saved" data-key="item-${s.id}-time">-${formatDuration(saved)}</span></div>`;
       });
       html += `</div>`;
     }
 
     resultsEl.innerHTML = html;
+    flashChangedValues(type, resultsEl);
+  }
+
+  // Briefly highlights any data-key value that changed since the last
+  // compute() for this type, so recalculated numbers are easier to notice.
+  const prevValues = { culture:{}, science:{} };
+  function flashChangedValues(type, resultsEl){
+    const cache = prevValues[type];
+    resultsEl.querySelectorAll("[data-key]").forEach(el=>{
+      const key = el.dataset.key;
+      const text = el.textContent;
+      if(cache[key] !== undefined && cache[key] !== text){
+        el.classList.add("value-flash");
+      }
+      cache[key] = text;
+    });
   }
 
   // ---------- Settlement library UI ----------
