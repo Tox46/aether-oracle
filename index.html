@@ -325,8 +325,19 @@
     font-size:.82rem;
     cursor:grab;
     user-select:none;
+    touch-action:none;
   }
   .library-chip:active{cursor:grabbing;}
+  .library-chip.dragging-source{opacity:.4;}
+  .chip-ghost{
+    position:fixed;
+    top:0;
+    left:0;
+    pointer-events:none;
+    z-index:300;
+    opacity:.92;
+    box-shadow:var(--shadow);
+  }
   .library-chip .key-badge{
     font-size:.68rem;
     color:var(--text-dim);
@@ -877,21 +888,23 @@
       const entry = library[key];
       const chip = document.createElement("div");
       chip.className = "library-chip";
-      chip.draggable = true;
       chip.innerHTML = `<span class="key-badge">${escapeHtml(key)}</span><span class="chip-name">${escapeHtml(entry.name || "(unnamed)")}</span><button class="chip-del" type="button" title="Forget this settlement">&times;</button>`;
 
-      chip.addEventListener("dragstart", e=>{
-        e.dataTransfer.setData("text/plain", key);
-        e.dataTransfer.effectAllowed = "copy";
-        setDropButtonsActive(true);
+      chip.addEventListener("pointerdown", e=>{
+        if(e.button !== 0) return;
+        startChipDrag(e, chip, key);
       });
-      chip.addEventListener("dragend", ()=>{
-        setDropButtonsActive(false);
+      chip.querySelector(".chip-name").addEventListener("click", ()=>{
+        if(chip.dataset.justDragged) return;
+        openLibraryModal(key);
       });
-      chip.querySelector(".chip-name").addEventListener("click", ()=> openLibraryModal(key));
-      chip.querySelector(".key-badge").addEventListener("click", ()=> openLibraryModal(key));
+      chip.querySelector(".key-badge").addEventListener("click", ()=>{
+        if(chip.dataset.justDragged) return;
+        openLibraryModal(key);
+      });
       chip.querySelector(".chip-del").addEventListener("click", (e)=>{
         e.stopPropagation();
+        if(chip.dataset.justDragged) return;
         const delBtn = e.currentTarget;
         if(!delBtn.classList.contains("confirm-armed")){
           armRemoveButton(delBtn, "click X again to remove it");
@@ -1001,37 +1014,110 @@
     });
   }
 
+  // Dropzones no longer need dedicated dragover/dragleave/drop wiring:
+  // the pointer-based drag below (see startChipDrag) detects the zone
+  // under the pointer itself and calls performDrop() directly. This
+  // sidesteps long-standing Firefox flakiness with the native HTML5
+  // Drag and Drop API (dragstart firing but the drag never completing).
   function wireDropzone(type){
-    const zone = document.getElementById("add-" + type);
-    zone.addEventListener("dragover", e=>{
+    // kept as a no-op hook for backwards compatibility / future wiring
+  }
+
+  function performDrop(type, key){
+    const entry = library[key];
+    if(!entry) return;
+    const proj = entry[type];
+    const settlement = {
+      id: uid(),
+      name: entry.name || "",
+      amount: proj ? proj.amount : 0,
+      hours: proj ? proj.hours : 0,
+      minutes: proj ? proj.minutes : 0,
+      builder: proj ? !!proj.builder : false
+    };
+    state[type].settlements.push(settlement);
+    saveState();
+    renderSettlements(type);
+    compute(type);
+  }
+
+  // ---------- Pointer-based chip drag (replaces native HTML5 DnD) ----------
+  // Native HTML5 drag-and-drop has a well-known Firefox reliability problem:
+  // the grab/grabbing cursor shows, but dragstart never actually completes a
+  // drag session, so drop never fires. Using Pointer Events instead gives us
+  // full control and works consistently across Firefox, Chrome, Safari, and
+  // touch devices.
+  function startChipDrag(startEvent, chip, key){
+    const pointerId = startEvent.pointerId;
+    const startX = startEvent.clientX;
+    const startY = startEvent.clientY;
+    const THRESHOLD = 6;
+    let dragging = false;
+    let ghost = null;
+
+    function currentZoneAt(x, y){
+      const el = document.elementFromPoint(x, y);
+      return el ? el.closest(".add-btn.dropzone") : null;
+    }
+
+    function updateDropTarget(x, y){
+      document.querySelectorAll(".add-btn.dropzone").forEach(z=> z.classList.remove("drag-over"));
+      const zone = currentZoneAt(x, y);
+      if(zone) zone.classList.add("drag-over");
+    }
+
+    function onMove(e){
+      if(e.pointerId !== pointerId) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if(!dragging){
+        if(Math.abs(dx) < THRESHOLD && Math.abs(dy) < THRESHOLD) return;
+        dragging = true;
+        chip.classList.add("dragging-source");
+        chip.dataset.justDragged = "1";
+        setDropButtonsActive(true);
+        const rect = chip.getBoundingClientRect();
+        ghost = chip.cloneNode(true);
+        ghost.classList.add("chip-ghost");
+        ghost.style.width = rect.width + "px";
+        document.body.appendChild(ghost);
+      }
       e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-      zone.classList.add("drag-over");
-    });
-    zone.addEventListener("dragleave", ()=>{
-      zone.classList.remove("drag-over");
-    });
-    zone.addEventListener("drop", e=>{
-      e.preventDefault();
-      zone.classList.remove("drag-over");
+      if(ghost){
+        ghost.style.left = (e.clientX + 14) + "px";
+        ghost.style.top = (e.clientY + 14) + "px";
+      }
+      updateDropTarget(e.clientX, e.clientY);
+    }
+
+    function cleanup(){
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      chip.classList.remove("dragging-source");
       setDropButtonsActive(false);
-      const key = e.dataTransfer.getData("text/plain");
-      const entry = library[key];
-      if(!entry) return;
-      const proj = entry[type];
-      const settlement = {
-        id: uid(),
-        name: entry.name || "",
-        amount: proj ? proj.amount : 0,
-        hours: proj ? proj.hours : 0,
-        minutes: proj ? proj.minutes : 0,
-        builder: proj ? !!proj.builder : false
-      };
-      state[type].settlements.push(settlement);
-      saveState();
-      renderSettlements(type);
-      compute(type);
-    });
+      document.querySelectorAll(".add-btn.dropzone").forEach(z=> z.classList.remove("drag-over"));
+      if(ghost){ ghost.remove(); ghost = null; }
+    }
+
+    function onUp(e){
+      if(e.pointerId !== pointerId) return;
+      if(dragging){
+        const zone = currentZoneAt(e.clientX, e.clientY);
+        if(zone && zone.dataset.type){
+          performDrop(zone.dataset.type, key);
+        }
+        cleanup();
+        // let click handlers on children see the flag briefly, then clear it
+        setTimeout(()=>{ delete chip.dataset.justDragged; }, 0);
+      } else {
+        cleanup();
+      }
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }
 
   function bindMainField(id, type, key){
